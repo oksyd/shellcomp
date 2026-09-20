@@ -222,6 +222,8 @@
 //! its startup-file update are separate changes; failures report any completed progress.
 //!
 //! Paths must be absolute and must not contain symlinks or parent-directory components.
+//! The standard macOS system directory aliases `/var`, `/tmp`, and `/etc` to their
+//! `/private` counterparts are allowed as ancestors; other symlinks remain disallowed.
 //! Startup files follow the same policy as completion targets. A completion target cannot be the
 //! shell's startup file. Path checks do not protect against another process replacing parent
 //! directories during an operation; managed directories must be trusted.

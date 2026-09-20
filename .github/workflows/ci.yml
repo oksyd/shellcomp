@@ -15,7 +15,11 @@ concurrency:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -46,6 +50,7 @@ jobs:
       - name: Cargo doctest without default features
         run: cargo test --doc --no-default-features
       - name: PowerShell runtime regression
+        if: runner.os == 'Linux'
         run: cargo test --all-features generated_profile_loads_literal_paths_without_changing_user_variables -- --ignored
       - name: Cargo doc
         run: cargo doc --no-deps --all-features

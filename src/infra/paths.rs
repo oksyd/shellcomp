@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -69,6 +70,46 @@ pub(crate) fn startup_path(env: &Environment, shell: &Shell) -> Result<Option<Pa
     })
 }
 
+// macOS exposes these system directories through aliases. Keep user-facing paths,
+// but use one identity for collision checks and in-process locks.
+#[cfg(any(target_os = "macos", test))]
+const MACOS_DIRECTORY_ALIASES: [(&str, &str); 3] = [
+    ("/var", "/private/var"),
+    ("/tmp", "/private/tmp"),
+    ("/etc", "/private/etc"),
+];
+
+pub(crate) fn path_identity(path: &Path) -> Cow<'_, Path> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_path_identity(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    Cow::Borrowed(path)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_path_identity(path: &Path) -> Cow<'_, Path> {
+    for (alias, destination) in MACOS_DIRECTORY_ALIASES {
+        if let Ok(suffix) = path.strip_prefix(alias) {
+            return Cow::Owned(Path::new(destination).join(suffix));
+        }
+    }
+    Cow::Borrowed(path)
+}
+
+fn is_system_directory_alias(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    for (alias, destination) in MACOS_DIRECTORY_ALIASES {
+        if path == Path::new(alias) {
+            return fs::read_link(path)
+                .is_ok_and(|link| Path::new("/").join(link) == Path::new(destination));
+        }
+    }
+    let _ = path;
+    false
+}
+
 pub(crate) fn validate_target_path(path: &Path) -> Result<()> {
     if path.is_relative() {
         return Err(Error::InvalidTargetPath {
@@ -90,6 +131,11 @@ pub(crate) fn validate_target_path(path: &Path) -> Result<()> {
     for candidate in path.ancestors() {
         match fs::symlink_metadata(candidate) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
+                if candidate != path && is_system_directory_alias(candidate) {
+                    // Inspect the physical path too; descendants may still be user symlinks.
+                    validate_target_path(path_identity(path).as_ref())?;
+                    continue;
+                }
                 return Err(Error::InvalidTargetPath {
                     path: path.to_path_buf(),
                     reason: "target path must not be a symbolic link",
@@ -226,5 +272,66 @@ mod tests {
         ] {
             assert!(validate_program_name(invalid).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod system_alias_tests {
+    use super::*;
+
+    #[test]
+    fn macos_system_aliases_have_a_single_component_aware_identity() {
+        for (alias, destination) in MACOS_DIRECTORY_ALIASES {
+            let original = Path::new(alias).join("nested/missing/file");
+            let physical = Path::new(destination).join("nested/missing/file");
+            assert_eq!(macos_path_identity(&original).as_ref(), physical);
+            assert_eq!(macos_path_identity(&physical).as_ref(), physical);
+        }
+        for path in [
+            "/variable/file",
+            "/tmp-other/file",
+            "/etcetera/file",
+            "/home/user/link/file",
+        ] {
+            assert_eq!(
+                macos_path_identity(Path::new(path)).as_ref(),
+                Path::new(path)
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_temp_paths_allow_system_aliases_but_reject_user_symlinks() {
+        let root = tempfile::tempdir_in("/var/tmp").unwrap();
+        let physical = root.path().canonicalize().unwrap();
+        let alias = Path::new("/").join(physical.strip_prefix("/private").unwrap());
+        let env = Environment::test().with_var("HOME", &alias);
+        let profile = physical.join(".bashrc");
+        assert!(matches!(
+            crate::service::resolve_target_path(&env, &Shell::Bash, "tool", Some(&profile)),
+            Err(Error::InvalidTargetPath { .. })
+        ));
+        let default = default_install_path(&env, &Shell::Bash, "tool").unwrap();
+        assert!(crate::service::default_target_path_matches(
+            &env,
+            &Shell::Bash,
+            "tool",
+            path_identity(&default).as_ref()
+        ));
+        let missing = alias.join("not-created/target");
+        validate_target_path(&missing).unwrap();
+        assert_eq!(
+            path_identity(&missing).as_ref(),
+            physical.join("not-created/target")
+        );
+        let target = alias.join("target");
+        super::super::fs::write_if_changed(&target, b"data").unwrap();
+        assert_eq!(fs::read(physical.join("target")).unwrap(), b"data");
+        std::os::unix::fs::symlink(&target, alias.join("link")).unwrap();
+        assert!(validate_target_path(&alias.join("link")).is_err());
+        std::os::unix::fs::symlink(&physical, alias.join("directory-link")).unwrap();
+        assert!(validate_target_path(&alias.join("directory-link/child")).is_err());
+        super::super::fs::remove_file_if_exists(&target).unwrap();
     }
 }

@@ -183,7 +183,7 @@ pub(crate) fn resolve_target_path(
         None => resolve_default_target_path(env, shell, program_name)?,
     };
     if let Ok(Some(profile)) = paths::startup_path(env, shell)
-        && target == profile
+        && paths::path_identity(&target) == paths::path_identity(&profile)
     {
         return Err(Error::InvalidTargetPath {
             path: target,
@@ -238,8 +238,9 @@ pub(crate) fn default_target_path_matches(
     program_name: &str,
     target_path: &Path,
 ) -> bool {
-    default_target_path_if_valid(env, shell, program_name)
-        .is_some_and(|default_path| default_path == target_path)
+    default_target_path_if_valid(env, shell, program_name).is_some_and(|default_path| {
+        paths::path_identity(&default_path) == paths::path_identity(target_path)
+    })
 }
 
 fn active_trace_id() -> u64 {
